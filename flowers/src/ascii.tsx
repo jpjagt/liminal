@@ -118,8 +118,10 @@ void main(){
   float speed=uSpeed;
   float noiseTime=uTime*speed;
   float n=snoise(vec3((fragCoord.x - r.x*0.5)*uNoiseScale,(fragCoord.y - r.y*0.5)*uNoiseScale,noiseTime));
-  uv0.x=fract(uv0.x)+uNoiseStrength*sin(n*TWOPI);
-  uv0.y=fract(uv0.y)+uNoiseStrength*cos(n*TWOPI);
+  uv0.x=uv0.x*2.0+uNoiseStrength*2.0*sin(n*TWOPI);
+  uv0.y=uv0.y*2.0+uNoiseStrength*2.0*cos(n*TWOPI);
+  // uv0.x=uv0.x+uNoiseStrength*sin(n*TWOPI);
+  // uv0.y=uv0.y+uNoiseStrength*cos(n*TWOPI);
 
   vec3 c; float l; float z=uTime;
   vec2 p = uv0;
@@ -295,27 +297,50 @@ const quad = (gl: Gl) => {
 }
 
 export const AsciiNoiseEffect = ({
-  noiseStrength = 0.42,
-  noiseScale = 0.0006,
+  /* noiseStrength = 0.42,
+   * noiseScale = 0.002,
+   * speed = -1,
+   * cell = 10,
+   * bw = false,
+   * charset = 0,
+   * tint = [0.7887163636784402, 1, 1],
+   * distortAmp = 0.86,
+   * frequency = 16.4,
+   * zRate = 0,
+   * brightness = 2,
+   * contrast = 1.46,
+   * seed1 = 8.359534820706298,
+   * seed2 = 4.8518677112236395,
+   * hue = 337.2,
+   * sat = 0.04,
+   * gamma = 1.46,
+   * vignette = 0.02,
+   * vignetteSoftness = 1.39,
+   * glyphSharpness = 0.04,
+   * bg = [0.0960355316732419, 0.0642024569325834, 0.06926603172039973], */
+
+  noiseStrength = 0.08,
+  noiseScale = 0.0018,
   speed = 0,
-  cell = 26,
+  cell = 20,
   bw = false,
   charset = 0,
-  tint = [0.7887163636784402, 1, 1],
-  distortAmp = 0.86,
-  frequency = 16.4,
+  tint = [1, 1, 1],
+  distortAmp = 0.5,
+  frequency = 9,
   zRate = 0,
-  brightness = 2,
-  contrast = 1.46,
-  seed1 = 8.359534820706298,
-  seed2 = 4.8518677112236395,
-  hue = 337.2,
-  sat = 0.04,
-  gamma = 1.46,
-  vignette = 0.02,
-  vignetteSoftness = 1.39,
-  glyphSharpness = 0.04,
-  bg = [0.0960355316732419, 0.0642024569325834, 0.06926603172039973],
+  brightness = 0.5,
+  contrast = 1,
+  seed1 = 4.674523052861597,
+  seed2 = 9.413390321646288,
+  hue = 0.1,
+  sat = 1,
+  gamma = 1.15,
+  vignette = 0,
+  vignetteSoftness = 1,
+  glyphSharpness = 0.05,
+  bg = [0, 0.1, 0],
+
   className,
 }: AsciiNoiseEffectProps) => {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -467,7 +492,7 @@ export const AsciiNoiseEffect = ({
 
       gl.bindFramebuffer(gl.FRAMEBUFFER, null)
       gl.viewport(0, 0, w, h)
-      gl.useProgram(progAscii)
+      // gl.useProgram(progAscii)
       gl.bindVertexArray(vao)
       gl.activeTexture(gl.TEXTURE0)
       gl.bindTexture(gl.TEXTURE_2D, texScene)
