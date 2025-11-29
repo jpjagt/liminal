@@ -1,4 +1,3 @@
-import "./App.css"
 import { AsciiNoiseEffect } from "./ascii.tsx"
 
 function App() {
