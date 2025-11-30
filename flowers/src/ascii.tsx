@@ -1,6 +1,12 @@
 "use client"
 
-import { useCallback, useEffect, useRef } from "react"
+import { useCallback, useEffect, useRef, useMemo } from "react"
+import {
+  stringToBitmasks,
+  PICKER_TEXT_GLSL,
+  computeTextLayer,
+} from "./lib/char-pickers"
+import type { TextItem } from "./lib/char-pickers"
 
 type Gl = WebGL2RenderingContext
 
@@ -11,8 +17,16 @@ interface AsciiNoiseEffectProps {
   speed?: number
   cell?: number
   bw?: boolean
-  charset?: 0 | 1 | 2
+  charset?: 0 | 1 | 2 | 3
+  text?: string
+  textOffset?: [number, number]
+  lineOffsetIncrease?: number
+  textItems?: TextItem[]
+  bgOpacity?: number
+  fgOpacity?: number
   tint?: [number, number, number]
+  scrollY?: number
+  gridOffset?: [number, number]
   distortAmp?: number
   frequency?: number
   zRate?: number
@@ -56,6 +70,7 @@ uniform float uContrast;
 uniform float uSeedA;
 uniform float uSeedB;
 uniform float uHueAngle; // degrees
+uniform vec2 uGridOffset; // Grid offset for background noise
 uniform float uSaturation; // 0..2
 uniform float uGammaCorrection; // 0.5..2
 uniform float uVignetteStrength; // 0..1
@@ -118,9 +133,12 @@ void main(){
   vec2 normalizedUv=fragmentCoordinates/canvasSize;
   float animationSpeed=uSpeed;
   float timeScaled=uTime*animationSpeed;
-  float noiseValue=snoise(vec3((fragmentCoordinates.x - canvasSize.x*0.5)*uNoiseScale,(fragmentCoordinates.y - canvasSize.y*0.5)*uNoiseScale,timeScaled));
-  normalizedUv.x=fract(normalizedUv.x)+uNoiseStrength*sin(noiseValue*TWOPI);
-  normalizedUv.y=fract(normalizedUv.y)+uNoiseStrength*cos(noiseValue*TWOPI);
+  // Offset the coordinate space for noise generation
+  vec2 offsetCoords = fragmentCoordinates + uGridOffset;
+
+  float noiseValue=snoise(vec3((offsetCoords.x - canvasSize.x*0.5)*uNoiseScale,(offsetCoords.y - canvasSize.y*0.5)*uNoiseScale,timeScaled));
+  normalizedUv.x=(normalizedUv.x)+uNoiseStrength*sin(noiseValue*TWOPI);
+  normalizedUv.y=(normalizedUv.y)+uNoiseStrength*cos(noiseValue*TWOPI);
 
   vec3 colorAccumulator; float distanceFromCenter; float zCoordinate=uTime;
   vec2 uvCurrent = normalizedUv;
@@ -169,6 +187,9 @@ uniform float uFrequency;
 uniform float uZAxisEvolutionRate;
 uniform float uSeedA;
 uniform float uSeedB;
+uniform mediump usampler2D uTextMap; // R=bitmask, G=opacity
+uniform float uBgOpacity;
+uniform float uFgOpacity;
 
 float gray(vec3 color){return dot(color, vec3(0.3,0.59,0.11));}
 
@@ -202,9 +223,12 @@ int pickCharMedium(float grayscaleValue){
   return 4096;
 }
 
-int pickCharSet(float grayscaleValue, int setId){
+${PICKER_TEXT_GLSL}
+
+int pickCharSet(float grayscaleValue, int setId, vec2 pixelCoords){
   if (setId==1) return pickCharMinimal(grayscaleValue);
   if (setId==2) return pickCharMedium(grayscaleValue);
+  if (setId==3) return pickCharText(pixelCoords, grayscaleValue, uCellSize);
   return pickCharFull(grayscaleValue);
 }
 
@@ -248,10 +272,57 @@ void main(){
   sampledColor *= uBrightness;
   sampledColor *= uTintColor;
   float grayscaleValue=gray(sampledColor);
-  int charMapValue=pickCharSet(grayscaleValue, uCharSetId);
-  vec2 charPixelUv = mod(fragmentCoordinates/(uCellSize*0.5), 2.0) - vec2(1.0);
-  vec3 outputColor = (uIsBlackAndWhite==1)? vec3(character(charMapValue,charPixelUv)) : sampledColor*character(charMapValue,charPixelUv);
-  fragColor=vec4(outputColor,1.0);
+
+  // Static text layer lookup
+  vec2 cellUv = floor(fragmentCoordinates / uCellSize) + 0.5;
+  // We need to map grid coord to texture coord. uTextMap has size of gridCols, gridRows.
+  // We can just use texture(uTextMap, blockUvCenter).
+  vec2 gridBlockCenter = (floor(fragmentCoordinates/uCellSize)*uCellSize + 0.5) / uResolution;
+
+  // Note: texture coordinates 0..1 map to 0..gridDim.
+  // Ideally, if we upload a texture of size WxH, and sample at uv, we get the nearest texel.
+  // We used GL_NEAREST.
+
+  uvec2 textData = texture(uTextMap, gridBlockCenter).xy;
+  uint mask = textData.r;
+  float textOpacity = float(textData.g) / 255.0; // 0..1
+
+  // Decide character and mix factor
+  // If mask != 0, we have text.
+  // Actually, even if mask is 0, if opacity > 0 it might mean "space" (empty char).
+  // But our layout engine writes 0 for empty space unless user put space char which has 0 mask?
+  // Quinque5 space has mask 0.
+  // So we check opacity.
+
+  // Note: user requested "add +1 ... to final color intensity * fgOpacity".
+  // This implies the text color should be (TintColor * Brightness) * FgOpacity * TextOpacity
+  // And it should overwrite the fluid where text is present.
+
+  if (textOpacity > 0.0) {
+    int charMapValue = int(mask);
+    vec2 charPixelUv = mod(fragmentCoordinates/(uCellSize*0.5), 2.0) - vec2(1.0);
+    float charVal = character(charMapValue, charPixelUv);
+
+    // We render the text color.
+    // Base text color is uTintColor * uBrightness.
+    vec3 textColor = uTintColor * uBrightness * charVal;
+
+    // Final text contribution:
+    // If we simply return this color, it overwrites.
+    // We scale by uFgOpacity and textOpacity (per-item opacity).
+
+    fragColor = vec4(textColor * uFgOpacity * textOpacity, 1.0);
+  } else {
+    int charMapValue = pickCharSet(grayscaleValue, uCharSetId, fragmentCoordinates);
+    vec2 charPixelUv = mod(fragmentCoordinates/(uCellSize*0.5), 2.0) - vec2(1.0);
+    float charVal = character(charMapValue, charPixelUv);
+
+    // Fluid color
+    vec3 fluidColor = (uIsBlackAndWhite==1)? vec3(charVal) : sampledColor*charVal;
+
+    // Apply bgOpacity
+    fragColor = vec4(fluidColor * uBgOpacity, 1.0);
+  }
 }
 `
 
@@ -296,18 +367,65 @@ const quad = (gl: Gl) => {
 }
 
 export const AsciiNoiseEffect = ({
+  /* noiseStrength = 0.39,
+   * noiseScale = 0.0005,
+   * speed = 0.78,
+   * cell = 24,
+   * bw = true,
+   * charset = 1,
+   * tint = [1, 0.3, 0.8702524358137375],
+   * distortAmp = 1.11,
+   * frequency = 17.99,
+   * zRate = 0.007,
+   * brightness = 0.92,
+   * contrast = 1.53,
+   * seed1 = 4.880335500734461,
+   * seed2 = 4.368472774461116,
+   * hue = 343.1,
+   * sat = 0.97,
+   * gamma = 1.15,
+   * vignette = 0.65,
+   * vignetteSoftness = 1.92,
+   * glyphSharpness = 0.134,
+   * bg = [0.02912780619892277, 0.017622800436411148, 0.09389556161243275], */
+
+  // quite minimalist
+  // pickCharText min grayscaleValue = 0.01
+  /* noiseStrength = 0.46,
+   * noiseScale = 0.0002,
+   * speed = 0.14,
+   * cell = 17,
+   * bw = true,
+   * charset = 2,
+   * tint = [0.45046742915750615, 1, 0.3],
+   * distortAmp = 1.31,
+   * frequency = 8.4,
+   * zRate = 0.026,
+   * brightness = 0.85,
+   * contrast = 1.46,
+   * seed1 = 2.0991707676867186,
+   * seed2 = 2.840680582023043,
+   * hue = 122.9,
+   * sat = 2,
+   * gamma = 1.34,
+   * vignette = 0.4,
+   * vignetteSoftness = 0.86,
+   * glyphSharpness = 0.032,
+   * bg = [0.05431432520581089, 0.023780997229068845, 0.03282002079918472], */
+
+  // og nice noise pattern
   noiseStrength = 0.42,
   noiseScale = 0.0006,
   speed = 0,
-  cell = 26,
+  cell = 30,
   bw = false,
-  charset = 0,
+  charset = 3,
   tint = [0.7887163636784402, 1, 1],
-  distortAmp = 0.86,
+  distortAmp = 0.6,
   frequency = 16.4,
   zRate = 0,
-  brightness = 2,
-  contrast = 1.46,
+  brightness = 1,
+  contrast = 1,
   seed1 = 8.359534820706298,
   seed2 = 4.8518677112236395,
   hue = 337.2,
@@ -318,8 +436,120 @@ export const AsciiNoiseEffect = ({
   glyphSharpness = 0.04,
   bg = [0.0960355316732419, 0.0642024569325834, 0.06926603172039973],
   className,
+
+  textItems,
+  bgOpacity = 1,
+  fgOpacity = 1,
+  scrollY = 0, // In grid units (cells)
+  gridOffset = [0, 0], // Background translation in grid units
+  text = "LIMINal.flOWERS ",
+  textOffset = [0, 0],
+  lineOffsetIncrease = 5,
 }: AsciiNoiseEffectProps) => {
+  const textBitmasks = useMemo(
+    () => (text ? stringToBitmasks(text) : []),
+    [text],
+  )
   const canvasRef = useRef<HTMLCanvasElement>(null)
+
+  // Ref to hold current props to avoid re-initializing shaders/textures on every render
+  const propsRef = useRef({
+    noiseStrength,
+    noiseScale,
+    speed,
+    cell,
+    bw,
+    charset,
+    textItems,
+    bgOpacity,
+    fgOpacity,
+    tint,
+    scrollY,
+    gridOffset,
+    distortAmp,
+    frequency,
+    zRate,
+    brightness,
+    contrast,
+    seed1,
+    seed2,
+    hue,
+    sat,
+    gamma,
+    vignette,
+    vignetteSoftness,
+    glyphSharpness,
+    bg,
+    textBitmasks,
+    textOffset,
+    lineOffsetIncrease,
+  })
+
+  // Update ref when props change
+  useEffect(() => {
+    propsRef.current = {
+      noiseStrength,
+      noiseScale,
+      speed,
+      cell,
+      bw,
+      charset,
+      textItems,
+      bgOpacity,
+      fgOpacity,
+      tint,
+      scrollY,
+      gridOffset,
+      distortAmp,
+      frequency,
+      zRate,
+      brightness,
+      contrast,
+      seed1,
+      seed2,
+      hue,
+      sat,
+      gamma,
+      vignette,
+      vignetteSoftness,
+      glyphSharpness,
+      bg,
+      textBitmasks,
+      textOffset,
+      lineOffsetIncrease,
+    }
+  }, [
+    noiseStrength,
+    noiseScale,
+    speed,
+    cell,
+    bw,
+    charset,
+    textItems,
+    bgOpacity,
+    fgOpacity,
+    tint,
+    scrollY,
+    gridOffset,
+    distortAmp,
+    frequency,
+    zRate,
+    brightness,
+    contrast,
+    seed1,
+    seed2,
+    hue,
+    sat,
+    gamma,
+    vignette,
+    vignetteSoftness,
+    glyphSharpness,
+    bg,
+    textBitmasks,
+    textOffset,
+    lineOffsetIncrease,
+  ])
+
   const resRef = useRef<{
     gl: Gl
     vao: WebGLVertexArrayObject
@@ -329,6 +559,7 @@ export const AsciiNoiseEffect = ({
     uNoise: Record<string, WebGLUniformLocation>
     uAscii: Record<string, WebGLUniformLocation>
     texScene: WebGLTexture
+    texTextMap: WebGLTexture
     fbScene: WebGLFramebuffer
   } | null>(null)
   const rafRef = useRef<number | null>(null)
@@ -358,6 +589,7 @@ export const AsciiNoiseEffect = ({
       uContrast: gl.getUniformLocation(progNoise, "uContrast")!,
       uSeedA: gl.getUniformLocation(progNoise, "uSeedA")!,
       uSeedB: gl.getUniformLocation(progNoise, "uSeedB")!,
+      uGridOffset: gl.getUniformLocation(progNoise, "uGridOffset")!,
       uHueAngle: gl.getUniformLocation(progNoise, "uHueAngle")!,
       uSaturation: gl.getUniformLocation(progNoise, "uSaturation")!,
       uGammaCorrection: gl.getUniformLocation(progNoise, "uGammaCorrection")!,
@@ -388,7 +620,27 @@ export const AsciiNoiseEffect = ({
       )!,
       uSeedA: gl.getUniformLocation(progAscii, "uSeedA")!,
       uSeedB: gl.getUniformLocation(progAscii, "uSeedB")!,
+      uTextValues: gl.getUniformLocation(progAscii, "uTextValues")!,
+      uTextLength: gl.getUniformLocation(progAscii, "uTextLength")!,
+      uTextOffset: gl.getUniformLocation(progAscii, "uTextOffset")!,
+      uLineOffsetIncrease: gl.getUniformLocation(
+        progAscii,
+        "uLineOffsetIncrease",
+      )!,
+      uTextMap: gl.getUniformLocation(progAscii, "uTextMap")!,
+      uBgOpacity: gl.getUniformLocation(progAscii, "uBgOpacity")!,
+      uFgOpacity: gl.getUniformLocation(progAscii, "uFgOpacity")!,
     } as const
+
+    const texTextMap = gl.createTexture()!
+    gl.bindTexture(gl.TEXTURE_2D, texTextMap)
+    // R32UI or RG32UI.
+    // For integer textures, filtering must be NEAREST.
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    gl.bindTexture(gl.TEXTURE_2D, null)
 
     const texScene = gl.createTexture()!
     gl.bindTexture(gl.TEXTURE_2D, texScene)
@@ -429,6 +681,7 @@ export const AsciiNoiseEffect = ({
       uNoise,
       uAscii,
       texScene,
+      texTextMap,
       fbScene,
     }
   }, [])
@@ -438,6 +691,40 @@ export const AsciiNoiseEffect = ({
       const res = resRef.current
       const canvas = canvasRef.current
       if (!res || !canvas) return
+
+      // Get current props from ref
+      const {
+        noiseStrength,
+        noiseScale,
+        speed,
+        cell,
+        bw,
+        charset,
+        textItems,
+        bgOpacity,
+        fgOpacity,
+        tint,
+        scrollY,
+        gridOffset,
+        distortAmp,
+        frequency,
+        zRate,
+        brightness,
+        contrast,
+        seed1,
+        seed2,
+        hue,
+        sat,
+        gamma,
+        vignette,
+        vignetteSoftness,
+        glyphSharpness,
+        bg,
+        textBitmasks,
+        textOffset,
+        lineOffsetIncrease,
+      } = propsRef.current
+
       const {
         gl,
         vao,
@@ -446,6 +733,7 @@ export const AsciiNoiseEffect = ({
         uNoise,
         uAscii,
         texScene,
+        texTextMap,
         fbScene,
       } = res
       if (startRef.current === 0) startRef.current = tMs
@@ -458,24 +746,30 @@ export const AsciiNoiseEffect = ({
       gl.bindVertexArray(vao)
       gl.uniform2f(uNoise.uResolution, w, h)
       gl.uniform1f(uNoise.uTime, t)
-      gl.uniform1f(uNoise.uNoiseStrength, noiseStrength)
-      gl.uniform1f(uNoise.uNoiseScale, noiseScale)
-      gl.uniform1f(uNoise.uSpeed, speed)
-      gl.uniform3f(uNoise.uTintColor, tint[0], tint[1], tint[2])
-      gl.uniform1f(uNoise.uDistortionAmplitude, distortAmp)
-      gl.uniform1f(uNoise.uFrequency, frequency)
-      gl.uniform1f(uNoise.uZAxisEvolutionRate, zRate)
-      gl.uniform1f(uNoise.uBrightness, brightness)
-      gl.uniform1f(uNoise.uContrast, contrast)
-      gl.uniform1f(uNoise.uSeedA, seed1)
-      gl.uniform1f(uNoise.uSeedB, seed2)
-      gl.uniform1f(uNoise.uHueAngle, hue)
-      gl.uniform1f(uNoise.uSaturation, sat)
-      gl.uniform1f(uNoise.uGammaCorrection, gamma)
-      gl.uniform1f(uNoise.uVignetteStrength, vignette)
-      gl.uniform1f(uNoise.uVignetteSoftness, vignetteSoftness)
-      gl.uniform1f(uNoise.uGlyphSharpness, glyphSharpness)
-      gl.uniform3f(uNoise.uBackgroundColor, bg[0], bg[1], bg[2])
+      gl.uniform1f(uNoise.uNoiseStrength, noiseStrength!)
+      gl.uniform1f(uNoise.uNoiseScale, noiseScale!)
+      gl.uniform1f(uNoise.uSpeed, speed!)
+      gl.uniform3f(uNoise.uTintColor, tint![0], tint![1], tint![2])
+      gl.uniform1f(uNoise.uDistortionAmplitude, distortAmp!)
+      gl.uniform1f(uNoise.uFrequency, frequency!)
+      gl.uniform1f(uNoise.uZAxisEvolutionRate, zRate!)
+      gl.uniform1f(uNoise.uBrightness, brightness!)
+      gl.uniform1f(uNoise.uContrast, contrast!)
+      gl.uniform1f(uNoise.uSeedA, seed1!)
+      gl.uniform1f(uNoise.uSeedB, seed2!)
+      // Grid offset in pixels. Passed in grid units.
+      gl.uniform2f(
+        uNoise.uGridOffset,
+        (gridOffset?.[0] || 0) * cell!,
+        (gridOffset?.[1] || 0) * cell!,
+      )
+      gl.uniform1f(uNoise.uHueAngle, hue!)
+      gl.uniform1f(uNoise.uSaturation, sat!)
+      gl.uniform1f(uNoise.uGammaCorrection, gamma!)
+      gl.uniform1f(uNoise.uVignetteStrength, vignette!)
+      gl.uniform1f(uNoise.uVignetteSoftness, vignetteSoftness!)
+      gl.uniform1f(uNoise.uGlyphSharpness, glyphSharpness!)
+      gl.uniform3f(uNoise.uBackgroundColor, bg![0], bg![1], bg![2])
       gl.drawArrays(gl.TRIANGLES, 0, 6)
 
       gl.bindFramebuffer(gl.FRAMEBUFFER, null)
@@ -484,46 +778,71 @@ export const AsciiNoiseEffect = ({
       gl.bindVertexArray(vao)
       gl.activeTexture(gl.TEXTURE0)
       gl.bindTexture(gl.TEXTURE_2D, texScene)
+
+      // Update Text Map Texture
+      // We need grid dimensions.
+      // uCellSize is uniform, but we have it as prop 'cell'.
+      const cols = Math.ceil(w / cell!)
+      const rows = Math.ceil(h / cell!)
+
+      // Compute layout
+      // Note: this might be heavy to do every frame if textItems is large,
+      // but typical use case is static or slow changing.
+      // To optimize, we could useMemo the buffer, but layout depends on cols/rows which change on resize.
+      // We can check if text buffer needs update? For now just do it.
+
+      // If we have no items, we still need a valid texture bound?
+      // Or we can just bind a 1x1 empty texture.
+      // But computeTextLayer handles empty items returning zeroed buffer.
+
+      const textBuffer = computeTextLayer(textItems || [], cols, rows, scrollY)
+
+      gl.activeTexture(gl.TEXTURE1)
+      gl.bindTexture(gl.TEXTURE_2D, texTextMap)
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.RG32UI,
+        cols,
+        rows,
+        0,
+        gl.RG_INTEGER,
+        gl.UNSIGNED_INT,
+        textBuffer,
+      )
+
       gl.uniform2f(uAscii.uInputResolution, w, h)
       gl.uniform1i(uAscii.uInputTexture, 0)
+      gl.uniform1i(uAscii.uTextMap, 1) // Texture unit 1
       gl.uniform2f(uAscii.uResolution, w, h)
-      gl.uniform1f(uAscii.uCellSize, cell)
+      gl.uniform1f(uAscii.uCellSize, cell!)
       gl.uniform1i(uAscii.uIsBlackAndWhite, bw ? 1 : 0)
-      gl.uniform1i(uAscii.uCharSetId, charset)
-      gl.uniform1f(uAscii.uBrightness, brightness)
-      gl.uniform1f(uAscii.uContrast, contrast)
-      gl.uniform3f(uAscii.uTintColor, tint[0], tint[1], tint[2])
+      gl.uniform1i(uAscii.uCharSetId, charset!)
+      gl.uniform1f(uAscii.uBrightness, brightness!)
+      gl.uniform1f(uAscii.uContrast, contrast!)
+      gl.uniform3f(uAscii.uTintColor, tint![0], tint![1], tint![2])
       gl.uniform1f(uAscii.uTime, t)
-      gl.uniform1f(uAscii.uDistortionAmplitude, distortAmp)
-      gl.uniform1f(uAscii.uFrequency, frequency)
-      gl.uniform1f(uAscii.uZAxisEvolutionRate, zRate)
-      gl.uniform1f(uAscii.uSeedA, seed1)
-      gl.uniform1f(uAscii.uSeedB, seed2)
+      gl.uniform1f(uAscii.uDistortionAmplitude, distortAmp!)
+      gl.uniform1f(uAscii.uFrequency, frequency!)
+      gl.uniform1f(uAscii.uZAxisEvolutionRate, zRate!)
+      gl.uniform1f(uAscii.uSeedA, seed1!)
+      gl.uniform1f(uAscii.uSeedB, seed2!)
+      gl.uniform1f(uAscii.uBgOpacity, bgOpacity!)
+      gl.uniform1f(uAscii.uFgOpacity, fgOpacity!)
+      const len = Math.min(textBitmasks.length, 128)
+      gl.uniform1i(uAscii.uTextLength, len)
+      if (len > 0) {
+        gl.uniform1iv(
+          uAscii.uTextValues,
+          new Int32Array(textBitmasks.slice(0, len)),
+        )
+      }
+      gl.uniform2f(uAscii.uTextOffset, textOffset[0], textOffset[1])
+      gl.uniform1f(uAscii.uLineOffsetIncrease, lineOffsetIncrease!)
       gl.drawArrays(gl.TRIANGLES, 0, 6)
       rafRef.current = window.requestAnimationFrame(render)
     },
-    [
-      bg,
-      brightness,
-      bw,
-      cell,
-      charset,
-      contrast,
-      distortAmp,
-      frequency,
-      gamma,
-      glyphSharpness,
-      hue,
-      noiseScale,
-      noiseStrength,
-      sat,
-      seed1,
-      seed2,
-      speed,
-      vignette,
-      vignetteSoftness,
-      zRate,
-    ],
+    [], // No dependencies, reads from ref
   )
 
   useEffect(() => {
@@ -566,7 +885,7 @@ export const AsciiNoiseEffect = ({
       if (rafRef.current) cancelAnimationFrame(rafRef.current)
       window.removeEventListener("resize", onResize)
     }
-  }, [init, render])
+  }, [init]) // Only run on mount/unmount since render is stable now
 
   return (
     <div className={"relative h-dvh w-full bg-black " + (className ?? "")}>

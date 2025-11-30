@@ -1,0 +1,3 @@
+#+BEGIN_SRC sh
+uv run --with pillow python fonts/font2bitmask.py quinque5f >> src/fonts/quinque5f.json
+#+END_SRC
