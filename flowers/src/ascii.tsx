@@ -30,37 +30,38 @@ interface AsciiNoiseEffectProps {
 }
 
 const vs = `#version 300 es
-layout(location=0) in vec2 aPos;
-out vec2 vUV;
+layout(location=0) in vec2 aPosition;
+out vec2 vUv;
 void main(){
-  vUV=(aPos+1.0)*0.5;
-  gl_Position=vec4(aPos,0.0,1.0);
+  vUv=(aPosition+1.0)*0.5;
+  gl_Position=vec4(aPosition,0.0,1.0);
 }`
+
 const fsNoise = `#version 300 es
 precision highp float;
 out vec4 fragColor;
-in vec2 vUV;
+in vec2 vUv;
 
 uniform vec2 uResolution;
 uniform float uTime;
 uniform float uNoiseStrength;
 uniform float uNoiseScale;
 uniform float uSpeed;
-uniform vec3 uTint;
-uniform float uDistortAmp;
+uniform vec3 uTintColor;
+uniform float uDistortionAmplitude;
 uniform float uFrequency;
-uniform float uZRate;
+uniform float uZAxisEvolutionRate;
 uniform float uBrightness;
 uniform float uContrast;
-uniform float uSeed1;
-uniform float uSeed2;
-uniform float uHue; // degrees
+uniform float uSeedA;
+uniform float uSeedB;
+uniform float uHueAngle; // degrees
 uniform float uSaturation; // 0..2
-uniform float uGamma; // 0.5..2
-uniform float uVignette; // 0..1
+uniform float uGammaCorrection; // 0.5..2
+uniform float uVignetteStrength; // 0..1
 uniform float uVignetteSoftness; // 0.1..2
 uniform float uGlyphSharpness; // 0.01..0.2
-uniform vec3 uBg;
+uniform vec3 uBackgroundColor;
 
 #define TWOPI 6.28318530718
 
@@ -97,160 +98,160 @@ float snoise(vec3 v){
   return 105.0*dot(m*m, vec4(dot(p0,x0),dot(p1,x1),dot(p2,x2),dot(p3,x3)));
 }
 
-vec3 rgb2hsv(vec3 c){
-  vec4 K = vec4(0.0, -1.0/3.0, 2.0/3.0, -1.0);
-  vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
-  vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
-  float d = q.x - min(q.w, q.y);
-  float e = 1.0e-10;
-  return vec3(abs(q.z + (q.w - q.y)/(6.0*d + e)), d/(q.x + e), q.x);
+vec3 rgb2hsv(vec3 rgbColor){
+  vec4 K_constants = vec4(0.0, -1.0/3.0, 2.0/3.0, -1.0);
+  vec4 p_mix = mix(vec4(rgbColor.bg, K_constants.wz), vec4(rgbColor.gb, K_constants.xy), step(rgbColor.b, rgbColor.g));
+  vec4 q_mix = mix(vec4(p_mix.xyw, rgbColor.r), vec4(rgbColor.r, p_mix.yzx), step(p_mix.x, rgbColor.r));
+  float chroma = q_mix.x - min(q_mix.w, q_mix.y);
+  float epsilon = 1.0e-10;
+  return vec3(abs(q_mix.z + (q_mix.w - q_mix.y)/(6.0*chroma + epsilon)), chroma/(q_mix.x + epsilon), q_mix.x);
 }
-vec3 hsv2rgb(vec3 c){
-  vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
-  vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
-  return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+vec3 hsv2rgb(vec3 hsvColor){
+  vec4 K_constants = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
+  vec3 p_mix = abs(fract(hsvColor.xxx + K_constants.xyz) * 6.0 - K_constants.www);
+  return hsvColor.z * mix(K_constants.xxx, clamp(p_mix - K_constants.xxx, 0.0, 1.0), hsvColor.y);
 }
 
 void main(){
-  vec2 fragCoord=vUV*uResolution;
-  vec2 r=uResolution;
-  vec2 uv0=fragCoord/r;
-  float speed=uSpeed;
-  float noiseTime=uTime*speed;
-  float n=snoise(vec3((fragCoord.x - r.x*0.5)*uNoiseScale,(fragCoord.y - r.y*0.5)*uNoiseScale,noiseTime));
-  uv0.x=fract(uv0.x)+uNoiseStrength*sin(n*TWOPI);
-  uv0.y=fract(uv0.y)+uNoiseStrength*cos(n*TWOPI);
+  vec2 fragmentCoordinates=vUv*uResolution;
+  vec2 canvasSize=uResolution;
+  vec2 normalizedUv=fragmentCoordinates/canvasSize;
+  float animationSpeed=uSpeed;
+  float timeScaled=uTime*animationSpeed;
+  float noiseValue=snoise(vec3((fragmentCoordinates.x - canvasSize.x*0.5)*uNoiseScale,(fragmentCoordinates.y - canvasSize.y*0.5)*uNoiseScale,timeScaled));
+  normalizedUv.x=fract(normalizedUv.x)+uNoiseStrength*sin(noiseValue*TWOPI);
+  normalizedUv.y=fract(normalizedUv.y)+uNoiseStrength*cos(noiseValue*TWOPI);
 
-  vec3 c; float l; float z=uTime;
-  vec2 p = uv0;
+  vec3 colorAccumulator; float distanceFromCenter; float zCoordinate=uTime;
+  vec2 uvCurrent = normalizedUv;
   for(int i=0;i<3;i++){
-    vec2 uv=p; vec2 q=p; q-=0.5; q.x*=r.x/r.y; z+=uZRate; l=length(q);
-    uv+=q/l*(sin(z+uSeed1)+1.0)*uDistortAmp*abs(sin(l*uFrequency - z - z + uSeed2));
-    c[i]=uGlyphSharpness/length(mod(uv,1.0)-0.5);
+    vec2 uvDistorted=uvCurrent; vec2 uvCentered=uvCurrent; uvCentered-=0.5; uvCentered.x*=canvasSize.x/canvasSize.y; zCoordinate+=uZAxisEvolutionRate; distanceFromCenter=length(uvCentered);
+    uvDistorted+=uvCentered/distanceFromCenter*(sin(zCoordinate+uSeedA)+1.0)*uDistortionAmplitude*abs(sin(distanceFromCenter*uFrequency - zCoordinate - zCoordinate + uSeedB));
+    colorAccumulator[i]=uGlyphSharpness/length(mod(uvDistorted,1.0)-0.5);
   }
-  vec3 col = c/l;
-  col = (col - 0.5) * uContrast + 0.5;
-  col *= uBrightness;
-  col *= uTint;
+  vec3 finalColor = colorAccumulator/distanceFromCenter;
+  finalColor = (finalColor - 0.5) * uContrast + 0.5;
+  finalColor *= uBrightness;
+  finalColor *= uTintColor;
 
-  vec3 hsv = rgb2hsv(max(col, 0.0));
-  hsv.x = fract(hsv.x + (uHue/360.0));
-  hsv.y = clamp(hsv.y * uSaturation, 0.0, 2.0);
-  col = hsv2rgb(hsv);
-  col = pow(max(col, 0.0), vec3(uGamma));
+  vec3 hsvColor = rgb2hsv(max(finalColor, 0.0));
+  hsvColor.x = fract(hsvColor.x + (uHueAngle/360.0));
+  hsvColor.y = clamp(hsvColor.y * uSaturation, 0.0, 2.0);
+  finalColor = hsv2rgb(hsvColor);
+  finalColor = pow(max(finalColor, 0.0), vec3(uGammaCorrection));
 
-  vec2 uvn = vUV - 0.5; uvn.x *= uResolution.x/uResolution.y;
-  float vr = length(uvn);
-  float vig = pow(1.0 - smoothstep(0.0, uVignetteSoftness, vr), 1.0);
-  col *= mix(1.0, vig, clamp(uVignette, 0.0, 1.0));
+  vec2 uvNormalizedVignette = vUv - 0.5; uvNormalizedVignette.x *= uResolution.x/uResolution.y;
+  float vignetteRadius = length(uvNormalizedVignette);
+  float vignetteFactor = pow(1.0 - smoothstep(0.0, uVignetteSoftness, vignetteRadius), 1.0);
+  finalColor *= mix(1.0, vignetteFactor, clamp(uVignetteStrength, 0.0, 1.0));
 
-  col = clamp(uBg + col, 0.0, 1.0);
-  fragColor=vec4(col,1.0);
+  finalColor = clamp(uBackgroundColor + finalColor, 0.0, 1.0);
+  fragColor=vec4(finalColor,1.0);
 }
 `
 const fsAscii = `#version 300 es
 precision highp float;
 out vec4 fragColor;
-in vec2 vUV;
+in vec2 vUv;
 
 uniform vec2 uResolution;
-uniform sampler2D uTexture;
-uniform vec2 uSourceResolution;
-uniform float uCell; // cell size (px)
-uniform int uBW; // 1=BW, 0=color multiply
-uniform int uCharset; // 0=full,1=minimal,2=medium
+uniform sampler2D uInputTexture;
+uniform vec2 uInputResolution;
+uniform float uCellSize; // cell size (px)
+uniform int uIsBlackAndWhite; // 1=BW, 0=color multiply
+uniform int uCharSetId; // 0=full,1=minimal,2=medium
 uniform float uBrightness;
 uniform float uContrast;
-uniform vec3 uTint;
+uniform vec3 uTintColor;
 uniform float uTime;
-uniform float uDistortAmp;
+uniform float uDistortionAmplitude;
 uniform float uFrequency;
-uniform float uZRate;
-uniform float uSeed1;
-uniform float uSeed2;
+uniform float uZAxisEvolutionRate;
+uniform float uSeedA;
+uniform float uSeedB;
 
-float gray(vec3 c){return dot(c, vec3(0.3,0.59,0.11));}
+float gray(vec3 color){return dot(color, vec3(0.3,0.59,0.11));}
 
-int pickCharFull(float g){
-  int n = 4096;
-  if (g>0.9535) n=33061407; else if (g>0.9302) n=32045630; else if (g>0.9070) n=33081316; else if (g>0.8837) n=32045617; else if (g>0.8605) n=32032318; else if (g>0.8372) n=15255537; else if (g>0.8140) n=15022414; else if (g>0.7907) n=32575775; else if (g>0.7674) n=16267326; else if (g>0.7442) n=18667121; else if (g>0.7209) n=18732593; else if (g>0.6977) n=32540207; else if (g>0.6744) n=32641183; else if (g>0.6512) n=18415153; else if (g>0.6279) n=16272942; else if (g>0.6047) n=15018318; else if (g>0.5814) n=15022158; else if (g>0.5581) n=18405034; else if (g>0.5349) n=32045584; else if (g>0.5116) n=15255086; else if (g>0.4884) n=33061392; else if (g>0.4651) n=18400814; else if (g>0.4419) n=18444881; else if (g>0.4186) n=16269839; else if (g>0.3953) n=6566222; else if (g>0.3721) n=13177118; else if (g>0.3488) n=14954572; else if (g>0.3256) n=17463428; else if (g>0.3023) n=18157905; else if (g>0.2791) n=18393412; else if (g>0.2558) n=32641156; else if (g>0.2326) n=17318431; else if (g>0.2093) n=15239300; else if (g>0.1860) n=18393220; else if (g>0.1628) n=14749828; else if (g>0.1395) n=12652620; else if (g>0.1163) n=4591748; else if (g>0.0930) n=459200; else if (g>0.0698) n=4329476; else if (g>0.0465) n=131200; else if (g>0.0233) n=4096; else n=4096; return n;
+int pickCharFull(float grayscaleValue){
+  int charMapValue = 4096;
+  if (grayscaleValue>0.9535) charMapValue=33061407; else if (grayscaleValue>0.9302) charMapValue=32045630; else if (grayscaleValue>0.9070) charMapValue=33081316; else if (grayscaleValue>0.8837) charMapValue=32045617; else if (grayscaleValue>0.8605) charMapValue=32032318; else if (grayscaleValue>0.8372) charMapValue=15255537; else if (grayscaleValue>0.8140) charMapValue=15022414; else if (grayscaleValue>0.7907) charMapValue=32575775; else if (grayscaleValue>0.7674) charMapValue=16267326; else if (grayscaleValue>0.7442) charMapValue=18667121; else if (grayscaleValue>0.7209) charMapValue=18732593; else if (grayscaleValue>0.6977) charMapValue=32540207; else if (grayscaleValue>0.6744) charMapValue=32641183; else if (grayscaleValue>0.6512) charMapValue=18415153; else if (grayscaleValue>0.6279) charMapValue=16272942; else if (grayscaleValue>0.6047) charMapValue=15018318; else if (grayscaleValue>0.5814) charMapValue=15022158; else if (grayscaleValue>0.5581) charMapValue=18405034; else if (grayscaleValue>0.5349) charMapValue=32045584; else if (grayscaleValue>0.5116) charMapValue=15255086; else if (grayscaleValue>0.4884) charMapValue=33061392; else if (grayscaleValue>0.4651) charMapValue=18400814; else if (grayscaleValue>0.4419) charMapValue=18444881; else if (grayscaleValue>0.4186) charMapValue=16269839; else if (grayscaleValue>0.3953) charMapValue=6566222; else if (grayscaleValue>0.3721) charMapValue=13177118; else if (grayscaleValue>0.3488) charMapValue=14954572; else if (grayscaleValue>0.3256) charMapValue=17463428; else if (grayscaleValue>0.3023) charMapValue=18157905; else if (grayscaleValue>0.2791) charMapValue=18393412; else if (grayscaleValue>0.2558) charMapValue=32641156; else if (grayscaleValue>0.2326) charMapValue=17318431; else if (grayscaleValue>0.2093) charMapValue=15239300; else if (grayscaleValue>0.1860) charMapValue=18393220; else if (grayscaleValue>0.1628) charMapValue=14749828; else if (grayscaleValue>0.1395) charMapValue=12652620; else if (grayscaleValue>0.1163) charMapValue=4591748; else if (grayscaleValue>0.0930) charMapValue=459200; else if (grayscaleValue>0.0698) charMapValue=4329476; else if (grayscaleValue>0.0465) charMapValue=131200; else if (grayscaleValue>0.0233) charMapValue=4096; else charMapValue=4096; return charMapValue;
 }
 
-int pickCharMinimal(float g){
+int pickCharMinimal(float grayscaleValue){
 
-  if (g>0.8) return 11512810; // '#'
-  if (g>0.7) return 13195790; // '@'
-  if (g>0.6) return 15252014; // '8'
-  if (g>0.5) return 13121101; // '&'
-  if (g>0.4) return 15255086; // 'o'
-  if (g>0.3) return 163153;   // '*'
-  if (g>0.2) return 65600;    // ':'
+  if (grayscaleValue>0.8) return 11512810; // '#'
+  if (grayscaleValue>0.7) return 13195790; // '@'
+  if (grayscaleValue>0.6) return 15252014; // '8'
+  if (grayscaleValue>0.5) return 13121101; // '&'
+  if (grayscaleValue>0.4) return 15255086; // 'o'
+  if (grayscaleValue>0.3) return 163153;   // '*'
+  if (grayscaleValue>0.2) return 65600;    // ':'
   return 4096;
 }
 
-int pickCharMedium(float g){
+int pickCharMedium(float grayscaleValue){
 
-  if (g>0.9) return 33061407; // dense
-  if (g>0.8) return 32045630;
-  if (g>0.7) return 18732593;
-  if (g>0.6) return 15022158;
-  if (g>0.5) return 15255086;
-  if (g>0.4) return 17463428;
-  if (g>0.3) return 18157905;
-  if (g>0.2) return 131200;
+  if (grayscaleValue>0.9) return 33061407; // dense
+  if (grayscaleValue>0.8) return 32045630;
+  if (grayscaleValue>0.7) return 18732593;
+  if (grayscaleValue>0.6) return 15022158;
+  if (grayscaleValue>0.5) return 15255086;
+  if (grayscaleValue>0.4) return 17463428;
+  if (grayscaleValue>0.3) return 18157905;
+  if (grayscaleValue>0.2) return 131200;
   return 4096;
 }
 
-int pickCharSet(float g, int setId){
-  if (setId==1) return pickCharMinimal(g);
-  if (setId==2) return pickCharMedium(g);
-  return pickCharFull(g);
+int pickCharSet(float grayscaleValue, int setId){
+  if (setId==1) return pickCharMinimal(grayscaleValue);
+  if (setId==2) return pickCharMedium(grayscaleValue);
+  return pickCharFull(grayscaleValue);
 }
 
-float character(int n, vec2 p){
-  p=floor(p*vec2(-4.0,4.0)+2.5);
-  if (clamp(p.x,0.0,4.0)==p.x){
-    if (clamp(p.y,0.0,4.0)==p.y){
-      int a=int(round(p.x)+5.0*round(p.y));
-      if (((n>>a)&1)==1) return 1.0;
+float character(int charMapValue, vec2 pixelPos){
+  pixelPos=floor(pixelPos*vec2(-4.0,4.0)+2.5);
+  if (clamp(pixelPos.x,0.0,4.0)==pixelPos.x){
+    if (clamp(pixelPos.y,0.0,4.0)==pixelPos.y){
+      int bitIndex=int(round(pixelPos.x)+5.0*round(pixelPos.y));
+      if (((charMapValue>>bitIndex)&1)==1) return 1.0;
     }
   }
   return 0.0;
 }
 
 void main(){
-  vec2 fragCoord=vUV*uResolution;
-  vec2 cellSize=vec2(uCell);
-  vec2 block=floor(fragCoord/cellSize)*cellSize;
+  vec2 fragmentCoordinates=vUv*uResolution;
+  vec2 cellSizeVec=vec2(uCellSize);
+  vec2 gridBlock=floor(fragmentCoordinates/cellSizeVec)*cellSizeVec;
 
-  vec2 src = uSourceResolution;
-  float srcAspect = src.x/src.y;
-  float dstAspect = uResolution.x/uResolution.y;
-  vec2 uvBlock = (block+0.5)/uResolution;
-  vec2 uvSource;
-  if (srcAspect > dstAspect) {
+  vec2 inputRes = uInputResolution;
+  float inputAspect = inputRes.x/inputRes.y;
+  float outputAspect = uResolution.x/uResolution.y;
+  vec2 blockUvCenter = (gridBlock+0.5)/uResolution;
+  vec2 sourceUv;
+  if (inputAspect > outputAspect) {
 
-    float scale = dstAspect/srcAspect;
-    uvSource = vec2(uvBlock.x*scale + (1.0-scale)*0.5, uvBlock.y);
+    float aspectRatioCorrection = outputAspect/inputAspect;
+    sourceUv = vec2(blockUvCenter.x*aspectRatioCorrection + (1.0-aspectRatioCorrection)*0.5, blockUvCenter.y);
   } else {
 
-    float scale = srcAspect/dstAspect;
-    uvSource = vec2(uvBlock.x, uvBlock.y*scale + (1.0-scale)*0.5);
+    float aspectRatioCorrection = inputAspect/outputAspect;
+    sourceUv = vec2(blockUvCenter.x, blockUvCenter.y*aspectRatioCorrection + (1.0-aspectRatioCorrection)*0.5);
   }
 
 
-  vec2 dispP = uvSource - 0.5;
-  float l = length(dispP)+1e-5;
-  vec2 uvJitter = uvSource + (dispP/l) * (sin(uTime+uSeed1)+1.0) * uDistortAmp * abs(sin(l*uFrequency - uTime - uTime + uSeed2)) * 0.002;
-  vec3 col=texture(uTexture, clamp(uvJitter, 0.0, 1.0)).rgb;
-  col = (col - 0.5) * uContrast + 0.5;
-  col *= uBrightness;
-  col *= uTint;
-  float g=gray(col);
-  int n=pickCharSet(g, uCharset);
-  vec2 p = mod(fragCoord/(uCell*0.5), 2.0) - vec2(1.0);
-  vec3 outCol = (uBW==1)? vec3(character(n,p)) : col*character(n,p);
-  fragColor=vec4(outCol,1.0);
+  vec2 displacementVector = sourceUv - 0.5;
+  float displacementLength = length(displacementVector)+1e-5;
+  vec2 jitteredSourceUv = sourceUv + (displacementVector/displacementLength) * (sin(uTime+uSeedA)+1.0) * uDistortionAmplitude * abs(sin(displacementLength*uFrequency - uTime - uTime + uSeedB)) * 0.002;
+  vec3 sampledColor=texture(uInputTexture, clamp(jitteredSourceUv, 0.0, 1.0)).rgb;
+  sampledColor = (sampledColor - 0.5) * uContrast + 0.5;
+  sampledColor *= uBrightness;
+  sampledColor *= uTintColor;
+  float grayscaleValue=gray(sampledColor);
+  int charMapValue=pickCharSet(grayscaleValue, uCharSetId);
+  vec2 charPixelUv = mod(fragmentCoordinates/(uCellSize*0.5), 2.0) - vec2(1.0);
+  vec3 outputColor = (uIsBlackAndWhite==1)? vec3(character(charMapValue,charPixelUv)) : sampledColor*character(charMapValue,charPixelUv);
+  fragColor=vec4(outputColor,1.0);
 }
 `
 
@@ -343,38 +344,50 @@ export const AsciiNoiseEffect = ({
       uNoiseStrength: gl.getUniformLocation(progNoise, "uNoiseStrength")!,
       uNoiseScale: gl.getUniformLocation(progNoise, "uNoiseScale")!,
       uSpeed: gl.getUniformLocation(progNoise, "uSpeed")!,
-      uTint: gl.getUniformLocation(progNoise, "uTint")!,
-      uDistortAmp: gl.getUniformLocation(progNoise, "uDistortAmp")!,
+      uTintColor: gl.getUniformLocation(progNoise, "uTintColor")!,
+      uDistortionAmplitude: gl.getUniformLocation(
+        progNoise,
+        "uDistortionAmplitude",
+      )!,
       uFrequency: gl.getUniformLocation(progNoise, "uFrequency")!,
-      uZRate: gl.getUniformLocation(progNoise, "uZRate")!,
+      uZAxisEvolutionRate: gl.getUniformLocation(
+        progNoise,
+        "uZAxisEvolutionRate",
+      )!,
       uBrightness: gl.getUniformLocation(progNoise, "uBrightness")!,
       uContrast: gl.getUniformLocation(progNoise, "uContrast")!,
-      uSeed1: gl.getUniformLocation(progNoise, "uSeed1")!,
-      uSeed2: gl.getUniformLocation(progNoise, "uSeed2")!,
-      uHue: gl.getUniformLocation(progNoise, "uHue")!,
+      uSeedA: gl.getUniformLocation(progNoise, "uSeedA")!,
+      uSeedB: gl.getUniformLocation(progNoise, "uSeedB")!,
+      uHueAngle: gl.getUniformLocation(progNoise, "uHueAngle")!,
       uSaturation: gl.getUniformLocation(progNoise, "uSaturation")!,
-      uGamma: gl.getUniformLocation(progNoise, "uGamma")!,
-      uVignette: gl.getUniformLocation(progNoise, "uVignette")!,
+      uGammaCorrection: gl.getUniformLocation(progNoise, "uGammaCorrection")!,
+      uVignetteStrength: gl.getUniformLocation(progNoise, "uVignetteStrength")!,
       uVignetteSoftness: gl.getUniformLocation(progNoise, "uVignetteSoftness")!,
       uGlyphSharpness: gl.getUniformLocation(progNoise, "uGlyphSharpness")!,
-      uBg: gl.getUniformLocation(progNoise, "uBg")!,
+      uBackgroundColor: gl.getUniformLocation(progNoise, "uBackgroundColor")!,
     } as const
     const uAscii = {
       uResolution: gl.getUniformLocation(progAscii, "uResolution")!,
-      uTexture: gl.getUniformLocation(progAscii, "uTexture")!,
-      uSourceResolution: gl.getUniformLocation(progAscii, "uSourceResolution")!,
-      uCell: gl.getUniformLocation(progAscii, "uCell")!,
-      uBW: gl.getUniformLocation(progAscii, "uBW")!,
-      uCharset: gl.getUniformLocation(progAscii, "uCharset")!,
+      uInputTexture: gl.getUniformLocation(progAscii, "uInputTexture")!,
+      uInputResolution: gl.getUniformLocation(progAscii, "uInputResolution")!,
+      uCellSize: gl.getUniformLocation(progAscii, "uCellSize")!,
+      uIsBlackAndWhite: gl.getUniformLocation(progAscii, "uIsBlackAndWhite")!,
+      uCharSetId: gl.getUniformLocation(progAscii, "uCharSetId")!,
       uBrightness: gl.getUniformLocation(progAscii, "uBrightness")!,
       uContrast: gl.getUniformLocation(progAscii, "uContrast")!,
-      uTint: gl.getUniformLocation(progAscii, "uTint")!,
+      uTintColor: gl.getUniformLocation(progAscii, "uTintColor")!,
       uTime: gl.getUniformLocation(progAscii, "uTime")!,
-      uDistortAmp: gl.getUniformLocation(progAscii, "uDistortAmp")!,
+      uDistortionAmplitude: gl.getUniformLocation(
+        progAscii,
+        "uDistortionAmplitude",
+      )!,
       uFrequency: gl.getUniformLocation(progAscii, "uFrequency")!,
-      uZRate: gl.getUniformLocation(progAscii, "uZRate")!,
-      uSeed1: gl.getUniformLocation(progAscii, "uSeed1")!,
-      uSeed2: gl.getUniformLocation(progAscii, "uSeed2")!,
+      uZAxisEvolutionRate: gl.getUniformLocation(
+        progAscii,
+        "uZAxisEvolutionRate",
+      )!,
+      uSeedA: gl.getUniformLocation(progAscii, "uSeedA")!,
+      uSeedB: gl.getUniformLocation(progAscii, "uSeedB")!,
     } as const
 
     const texScene = gl.createTexture()!
@@ -448,21 +461,21 @@ export const AsciiNoiseEffect = ({
       gl.uniform1f(uNoise.uNoiseStrength, noiseStrength)
       gl.uniform1f(uNoise.uNoiseScale, noiseScale)
       gl.uniform1f(uNoise.uSpeed, speed)
-      gl.uniform3f(uNoise.uTint, tint[0], tint[1], tint[2])
-      gl.uniform1f(uNoise.uDistortAmp, distortAmp)
+      gl.uniform3f(uNoise.uTintColor, tint[0], tint[1], tint[2])
+      gl.uniform1f(uNoise.uDistortionAmplitude, distortAmp)
       gl.uniform1f(uNoise.uFrequency, frequency)
-      gl.uniform1f(uNoise.uZRate, zRate)
+      gl.uniform1f(uNoise.uZAxisEvolutionRate, zRate)
       gl.uniform1f(uNoise.uBrightness, brightness)
       gl.uniform1f(uNoise.uContrast, contrast)
-      gl.uniform1f(uNoise.uSeed1, seed1)
-      gl.uniform1f(uNoise.uSeed2, seed2)
-      gl.uniform1f(uNoise.uHue, hue)
+      gl.uniform1f(uNoise.uSeedA, seed1)
+      gl.uniform1f(uNoise.uSeedB, seed2)
+      gl.uniform1f(uNoise.uHueAngle, hue)
       gl.uniform1f(uNoise.uSaturation, sat)
-      gl.uniform1f(uNoise.uGamma, gamma)
-      gl.uniform1f(uNoise.uVignette, vignette)
+      gl.uniform1f(uNoise.uGammaCorrection, gamma)
+      gl.uniform1f(uNoise.uVignetteStrength, vignette)
       gl.uniform1f(uNoise.uVignetteSoftness, vignetteSoftness)
       gl.uniform1f(uNoise.uGlyphSharpness, glyphSharpness)
-      gl.uniform3f(uNoise.uBg, bg[0], bg[1], bg[2])
+      gl.uniform3f(uNoise.uBackgroundColor, bg[0], bg[1], bg[2])
       gl.drawArrays(gl.TRIANGLES, 0, 6)
 
       gl.bindFramebuffer(gl.FRAMEBUFFER, null)
@@ -471,21 +484,21 @@ export const AsciiNoiseEffect = ({
       gl.bindVertexArray(vao)
       gl.activeTexture(gl.TEXTURE0)
       gl.bindTexture(gl.TEXTURE_2D, texScene)
-      gl.uniform2f(uAscii.uSourceResolution, w, h)
-      gl.uniform1i(uAscii.uTexture, 0)
+      gl.uniform2f(uAscii.uInputResolution, w, h)
+      gl.uniform1i(uAscii.uInputTexture, 0)
       gl.uniform2f(uAscii.uResolution, w, h)
-      gl.uniform1f(uAscii.uCell, cell)
-      gl.uniform1i(uAscii.uBW, bw ? 1 : 0)
-      gl.uniform1i(uAscii.uCharset, charset)
+      gl.uniform1f(uAscii.uCellSize, cell)
+      gl.uniform1i(uAscii.uIsBlackAndWhite, bw ? 1 : 0)
+      gl.uniform1i(uAscii.uCharSetId, charset)
       gl.uniform1f(uAscii.uBrightness, brightness)
       gl.uniform1f(uAscii.uContrast, contrast)
-      gl.uniform3f(uAscii.uTint, tint[0], tint[1], tint[2])
+      gl.uniform3f(uAscii.uTintColor, tint[0], tint[1], tint[2])
       gl.uniform1f(uAscii.uTime, t)
-      gl.uniform1f(uAscii.uDistortAmp, distortAmp)
+      gl.uniform1f(uAscii.uDistortionAmplitude, distortAmp)
       gl.uniform1f(uAscii.uFrequency, frequency)
-      gl.uniform1f(uAscii.uZRate, zRate)
-      gl.uniform1f(uAscii.uSeed1, seed1)
-      gl.uniform1f(uAscii.uSeed2, seed2)
+      gl.uniform1f(uAscii.uZAxisEvolutionRate, zRate)
+      gl.uniform1f(uAscii.uSeedA, seed1)
+      gl.uniform1f(uAscii.uSeedB, seed2)
       gl.drawArrays(gl.TRIANGLES, 0, 6)
       rafRef.current = window.requestAnimationFrame(render)
     },
