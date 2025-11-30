@@ -40,6 +40,7 @@ const textItems: TextItem[] = [
     x: { pct: 0.5, px: -X_OFFSET },
     y: Y_START + 3,
     anchorX: "right",
+    renderSpaces: false,
   },
   // Item 2
 
@@ -149,7 +150,7 @@ function App() {
       // Integrate position
       offsetRef.current += smoothVelocity.current * dt
 
-      setGridOffset([0, offsetRef.current])
+      setGridOffset([0, -offsetRef.current])
 
       animId = requestAnimationFrame(animate)
     }
