@@ -25,13 +25,16 @@ export const stringToBitmasks = (
 export type PositionSpec = number | { pct?: number; px?: number }
 
 export interface TextItem {
-  text: string
+  text?: string
+  component?: React.ReactNode
   x: PositionSpec
   y: PositionSpec
   anchorX?: "left" | "center" | "right"
   anchorY?: "top" | "center" | "bottom"
   opacity?: number // 0..1, default 1
   maxWidth?: number // in characters
+  width?: number // for components (in cells)
+  height?: number // for components (in cells)
   renderSpaces?: boolean // default true
 }
 
@@ -42,14 +45,96 @@ const resolvePos = (spec: PositionSpec, totalSize: number): number => {
   return pct * totalSize + px
 }
 
+export const getGridPosition = (
+  item: TextItem,
+  cols: number,
+  rows: number,
+  scrollYOffset: number = 0
+): { x: number; y: number; width: number; height: number } => {
+  const gridX = resolvePos(item.x, cols)
+  // In the texture buffer, y=0 is bottom. But for screen coordinates (DOM), y=0 is top.
+  // computeTextLayer uses: rows - 1 - (resolvePos(item.y, rows) - scrollYOffset)
+  // This seems to map "y=0" in item config to the bottom of the screen?
+  // Let's check App.tsx items.
+  // Item 1: y = Y_START (40).
+  // If y=0 is top, increasing y goes down.
+  // In computeTextLayer: gridY = rows - 1 - (resolvePos(item.y, rows) - scrollYOffset)
+  // If resolvePos returns 40. gridY = rows - 1 - (40 - scrollY).
+  // If scrollY increases (scrolling down), gridY increases (moves up visually?).
+  // Wait. standard scrolling: content moves UP.
+  // If scrollY increases, (40 - scrollY) decreases.
+  // rows - 1 - (smaller number) => larger number (higher in texture = top of screen?).
+  // Let's verify coordinate system of texture.
+  // computeTextLayer writes to buffer.
+  // row 0 is usually bottom in GL?
+  // In ascii.tsx:
+  // int pickCharText...
+  // vec2 pos = pixelCoords + uTextOffset
+  // int gridY = int(floor(pos.y / cellSize))
+  // pixelCoords (0,0) is usually bottom-left in standard GL, but top-left in generic 2D?
+  // In vs: gl_Position = vec4(aPosition, 0.0, 1.0). aPosition is -1..1.
+  // vUv = (aPosition+1)*0.5. (0..1).
+  // fragmentCoordinates = vUv * uResolution.
+  // usually vUv (0,0) is bottom-left.
+  // So pixelCoords.y=0 is bottom.
+  // So gridY=0 is bottom row.
+  // If App.tsx defines Y_START=40 (which is positive).
+  // In computeTextLayer: gridY = rows - 1 - (40 - scroll).
+  // If scroll=0, gridY = rows - 1 - 40.
+  // If rows=100, gridY = 99 - 40 = 59. (Middle-ish).
+  // If scroll increases (scrolling down), gridY increases. Moves UP the texture (towards top).
+  // This matches standard scroll behavior (content moves up).
+
+  // For DOM elements, we want TOP-LEFT coordinates.
+  // DOM Y = (resolvePos(item.y, rows) - scrollYOffset) * CELL_SIZE?
+  // Wait. If y=40, and scroll=0. content is at 40 cells from... top?
+  // If computeTextLayer maps it to (rows-1) - 40.
+  // If texture Y=0 is bottom, then texture Y=rows-1 is TOP.
+  // So gridY is measured from bottom.
+  // So item at y=40 is 40 cells from the TOP.
+  // So for DOM, Y = 40.
+  // If scroll increases, we subtract scroll.
+  // DOM Y = 40 - scrollYOffset.
+
+  let width = 0
+  let height = 0
+
+  if (item.component) {
+    width = item.width || 0
+    height = item.height || 0
+  } else if (item.text) {
+     // For simplicity in this helper, we might need to duplicate the wrapping logic
+     // or just trust the user provided width/height for components?
+     // The helper is mostly for DOM components, so we can assume width/height are provided or irrelevant for text here.
+     // But for precise anchor calculation we need width.
+     // Let's assume for DOM components, width is explicit.
+  }
+
+  let startX = gridX
+  let startY = resolvePos(item.y, rows) - scrollYOffset // This is in "cells from top"
+
+  if (item.anchorX === "center") startX -= width / 2
+  if (item.anchorX === "right") startX -= width
+
+  if (item.anchorY === "center") startY -= height / 2
+  if (item.anchorY === "bottom") startY -= height
+
+  return { x: startX, y: startY, width, height }
+}
+
 export const getContentHeight = (items: TextItem[], rows: number): number => {
   let maxY = 0
   items.forEach((item) => {
     const absY = resolvePos(item.y, rows)
-    const lines = item.text.split("\n").length
-    const estimatedLines = item.maxWidth
-      ? Math.ceil(item.text.length / item.maxWidth) * 1.5
-      : lines
+    let estimatedLines = 0
+    if (item.component) {
+      estimatedLines = item.height || 0
+    } else if (item.text) {
+      const lines = item.text.split("\n").length
+      estimatedLines = item.maxWidth
+        ? Math.ceil(item.text.length / item.maxWidth) * 1.5
+        : lines
+    }
     maxY = Math.max(maxY, absY + estimatedLines)
   })
   return maxY
@@ -76,6 +161,9 @@ export const computeTextLayer = (
   buffer.fill(0)
 
   items.forEach((item) => {
+    if (item.component) return
+    if (!item.text) return
+
     const opacity = Math.floor(
       Math.max(0, Math.min(1, item.opacity ?? 1)) * 255,
     )
