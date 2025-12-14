@@ -36,6 +36,15 @@ export interface TextItem {
   width?: number // for components (in cells)
   height?: number // for components (in cells)
   renderSpaces?: boolean // default true
+  shapeId?: string
+  shapeView?: string
+  // Fixed position mode: text stays fixed on screen and fades in/out based on scroll position
+  fixed?: {
+    yStart: number // scroll position (in cells) where text starts appearing
+    yEnd: number // scroll position (in cells) where text disappears
+    fadeInCells?: number // number of cells over which to fade in (default 4)
+    fadeOutCells?: number // number of cells over which to fade out (default same as fadeInCells)
+  }
 }
 
 const resolvePos = (spec: PositionSpec, totalSize: number): number => {
@@ -49,7 +58,7 @@ export const getGridPosition = (
   item: TextItem,
   cols: number,
   rows: number,
-  scrollYOffset: number = 0
+  scrollYOffset: number = 0,
 ): { x: number; y: number; width: number; height: number } => {
   const gridX = resolvePos(item.x, cols)
   // In the texture buffer, y=0 is bottom. But for screen coordinates (DOM), y=0 is top.
@@ -103,11 +112,11 @@ export const getGridPosition = (
     width = item.width || 0
     height = item.height || 0
   } else if (item.text) {
-     // For simplicity in this helper, we might need to duplicate the wrapping logic
-     // or just trust the user provided width/height for components?
-     // The helper is mostly for DOM components, so we can assume width/height are provided or irrelevant for text here.
-     // But for precise anchor calculation we need width.
-     // Let's assume for DOM components, width is explicit.
+    // For simplicity in this helper, we might need to duplicate the wrapping logic
+    // or just trust the user provided width/height for components?
+    // The helper is mostly for DOM components, so we can assume width/height are provided or irrelevant for text here.
+    // But for precise anchor calculation we need width.
+    // Let's assume for DOM components, width is explicit.
   }
 
   let startX = gridX
@@ -125,6 +134,9 @@ export const getGridPosition = (
 export const getContentHeight = (items: TextItem[], rows: number): number => {
   let maxY = 0
   items.forEach((item) => {
+    // Fixed items don't contribute to content height (they're viewport-fixed)
+    if (item.fixed) return
+
     const absY = resolvePos(item.y, rows)
     let estimatedLines = 0
     if (item.component) {
@@ -132,7 +144,7 @@ export const getContentHeight = (items: TextItem[], rows: number): number => {
     } else if (item.text) {
       const lines = item.text.split("\n").length
       estimatedLines = item.maxWidth
-        ? Math.ceil(item.text.length / item.maxWidth) * 1.5
+        ? Math.ceil(item.text.length / item.maxWidth) * 1.1
         : lines
     }
     maxY = Math.max(maxY, absY + estimatedLines)
@@ -160,13 +172,53 @@ export const computeTextLayer = (
   // Fill with 0
   buffer.fill(0)
 
+  // Simple deterministic hash for consistent random values per grid position
+  const hash = (x: number, y: number): number => {
+    const n = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453
+    return n - Math.floor(n)
+  }
+
   items.forEach((item) => {
     if (item.component) return
     if (!item.text) return
 
-    const opacity = Math.floor(
-      Math.max(0, Math.min(1, item.opacity ?? 1)) * 255,
-    )
+    // Calculate fade state for fixed items
+    // fadeProgress: 0 = fully hidden, 1 = fully visible
+    // fadeDirection: 'in' | 'out' | 'full' | 'hidden'
+    let fadeProgress = 1
+    let fadeDirection: "in" | "out" | "full" | "hidden" = "full"
+
+    const baseOpacity = item.opacity ?? 1
+
+    if (item.fixed) {
+      const {
+        yStart,
+        yEnd,
+        fadeInCells = 4,
+        fadeOutCells = fadeInCells,
+      } = item.fixed
+
+      // scrollYOffset is in cells
+      if (scrollYOffset < yStart) {
+        fadeProgress = 0
+        fadeDirection = "hidden"
+      } else if (scrollYOffset < yStart + fadeInCells) {
+        fadeProgress = (scrollYOffset - yStart) / fadeInCells
+        fadeDirection = "in"
+      } else if (scrollYOffset <= yEnd - fadeOutCells) {
+        fadeProgress = 1
+        fadeDirection = "full"
+      } else if (scrollYOffset < yEnd) {
+        fadeProgress = (yEnd - scrollYOffset) / fadeOutCells
+        fadeDirection = "out"
+      } else {
+        fadeProgress = 0
+        fadeDirection = "hidden"
+      }
+    }
+
+    // Skip rendering if completely hidden
+    if (fadeDirection === "hidden") return
 
     // Split keeping delimiters to preserve spaces if needed, but here simple split by char for font mapping.
     // We need words for wrapping.
@@ -230,7 +282,11 @@ export const computeTextLayer = (
     }
 
     const gridX = resolvePos(item.x, cols)
-    const gridY = rows - 1 - (resolvePos(item.y, rows) - scrollYOffset)
+    // For fixed items, y position is fixed on screen (not affected by scroll)
+    // For regular items, y position scrolls with content
+    const gridY = item.fixed
+      ? rows - 1 - resolvePos(item.y, rows)
+      : rows - 1 - (resolvePos(item.y, rows) - scrollYOffset)
 
     let startX = gridX
     let startY = gridY
@@ -255,6 +311,30 @@ export const computeTextLayer = (
 
         const char = line[i]
 
+        // Calculate per-character opacity for fixed items with flicker effect
+        let charOpacityMultiplier = 1
+
+        if (item.fixed && fadeDirection !== "full") {
+          // Use grid position to get a consistent random threshold for this character
+          const charRandom = hash(col, row)
+
+          // 3 opacity levels: 0, 0.5, 1
+          // Each character has a random "appear threshold" (0-1)
+          // As fadeProgress increases, more characters appear
+          // Characters first appear at 0.5 opacity, then full opacity
+
+          if (fadeProgress < charRandom * 0.5) {
+            // Character hasn't started appearing yet
+            charOpacityMultiplier = 0
+          } else if (fadeProgress < charRandom) {
+            // Character is at half opacity (flickering stage)
+            charOpacityMultiplier = 0.5
+          } else {
+            // Character is fully visible
+            charOpacityMultiplier = 1
+          }
+        }
+
         // Whitespace handling
         let mask = 0
         let charOpacity = 0
@@ -264,10 +344,10 @@ export const computeTextLayer = (
         } else if (char === " ") {
           // Render space (overwrite bg)
           mask = 0
-          charOpacity = opacity
+          charOpacity = Math.floor(baseOpacity * charOpacityMultiplier * 255)
         } else {
           mask = (font as any)[char] || 0
-          charOpacity = opacity
+          charOpacity = Math.floor(baseOpacity * charOpacityMultiplier * 255)
         }
 
         const idx = (row * cols + col) * 2
