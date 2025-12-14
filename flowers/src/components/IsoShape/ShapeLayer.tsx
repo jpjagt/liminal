@@ -90,7 +90,7 @@ export const ShapeLayer: React.FC<ShapeLayerProps> = ({
     () => ({
       depth: thickness,
       bevelEnabled: false,
-      curveSegments: 24,
+      curveSegments: 8, // Reduced from 24 - faster geometry creation
     }),
     [thickness]
   );

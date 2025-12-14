@@ -190,7 +190,9 @@ export const ShapeScene: React.FC<ShapeSceneProps> = ({
       >
         <Canvas
           style={{ width: "100%", height: "100%" }}
-          gl={{ alpha: true, antialias: true }}
+          gl={{ alpha: true, antialias: true, powerPreference: "high-performance" }}
+          dpr={[1, 1.5]} // Limit pixel ratio to reduce GPU load
+          performance={{ min: 0.5 }} // Allow frame dropping under load
         >
           <ShapeSceneInner>{children}</ShapeSceneInner>
         </Canvas>

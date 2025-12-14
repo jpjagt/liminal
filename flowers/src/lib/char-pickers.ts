@@ -1,5 +1,16 @@
 import quinque5 from "../fonts/quinque5.json"
 import quinque5f from "../fonts/quinque5f.json"
+import {
+  type FadeEffectType,
+  type FadeEffectContext,
+  type WordInfo,
+  getFadeEffect,
+  parseWords,
+  generateWordOrder,
+  getCharWordInfo,
+} from "./fade-effects"
+
+export type { FadeEffectType } from "./fade-effects"
 
 export const fonts = {
   quinque5,
@@ -35,7 +46,7 @@ export interface TextItem {
   maxWidth?: number // in characters
   width?: number // for components (in cells)
   height?: number // for components (in cells)
-  renderSpaces?: boolean // default true
+  renderSpaces?: boolean // default false
   shapeId?: string
   shapeView?: string
   // Fixed position mode: text stays fixed on screen and fades in/out based on scroll position
@@ -44,7 +55,13 @@ export interface TextItem {
     yEnd: number // scroll position (in cells) where text disappears
     fadeInCells?: number // number of cells over which to fade in (default 4)
     fadeOutCells?: number // number of cells over which to fade out (default same as fadeInCells)
+    fadeEffect?: FadeEffectType // "random" | "bg" | "words" | "sequential" (default "random")
+    fadeReverse?: boolean // reverse animation direction (for RTL/bottom-up text)
+    fadeTotalChars?: number // override total char count for syncing multiple items
   }
+  // Cached word info for words fade effect (computed once on first render)
+  _wordInfo?: WordInfo[]
+  _wordOrder?: number[]
 }
 
 const resolvePos = (spec: PositionSpec, totalSize: number): number => {
@@ -152,9 +169,19 @@ export const getContentHeight = (items: TextItem[], rows: number): number => {
   return maxY
 }
 
+/** Simple 3D noise approximation for bg fade effect */
+const simplexNoise3D = (x: number, y: number, z: number): number => {
+  // Simplified noise - not true simplex but gives organic-ish values
+  const n1 = Math.sin(x * 0.1 + z * 0.3) * Math.cos(y * 0.1 + z * 0.2)
+  const n2 = Math.sin(x * 0.05 - z * 0.1) * Math.cos(y * 0.07 + z * 0.15)
+  const n3 = Math.sin((x + y) * 0.03 + z * 0.4)
+  return ((n1 + n2 + n3) / 3) * 0.5 + 0.5 // Normalize to 0-1
+}
+
 /**
  * Computes the text texture for the current viewport.
  * @param scrollYOffset - The vertical scroll offset in GRID CELLS (rows).
+ * @param time - Current animation time in seconds (for bg fade effect)
  */
 export const computeTextLayer = (
   items: TextItem[],
@@ -162,6 +189,7 @@ export const computeTextLayer = (
   rows: number,
   scrollYOffset: number = 0,
   font: Record<string, number> = DEFAULT_FONT,
+  time: number = 0,
 ): Uint32Array => {
   // 2 channels per cell: R=Bitmask, G=Opacity(0-255)
   // WebGL2 RG32UI texture uses Uint32Array.
@@ -171,12 +199,6 @@ export const computeTextLayer = (
 
   // Fill with 0
   buffer.fill(0)
-
-  // Simple deterministic hash for consistent random values per grid position
-  const hash = (x: number, y: number): number => {
-    const n = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453
-    return n - Math.floor(n)
-  }
 
   items.forEach((item) => {
     if (item.component) return
@@ -300,6 +322,24 @@ export const computeTextLayer = (
     if (item.anchorY === "center") startY += (totalHeight - 1) / 2
     if (item.anchorY === "bottom") startY += totalHeight - 1
 
+    // For words effect, compute word info once per item
+    const fadeEffectType = item.fixed?.fadeEffect || "random"
+    let wordInfo: WordInfo[] | undefined
+    let wordOrder: number[] | undefined
+
+    if (fadeEffectType === "words" && item.text) {
+      // Use cached or compute new
+      if (!item._wordInfo) {
+        item._wordInfo = parseWords(item.text)
+        item._wordOrder = generateWordOrder(item.text)
+      }
+      wordInfo = item._wordInfo
+      wordOrder = item._wordOrder
+    }
+
+    // Track character index across wrapped lines
+    let globalCharIndex = 0
+
     // Rasterize
     lines.forEach((line, lineIdx) => {
       const row = Math.floor(startY - lineIdx)
@@ -311,35 +351,49 @@ export const computeTextLayer = (
 
         const char = line[i]
 
-        // Calculate per-character opacity for fixed items with flicker effect
+        // Calculate per-character opacity for fixed items with fade effect
         let charOpacityMultiplier = 1
 
         if (item.fixed && fadeDirection !== "full") {
-          // Use grid position to get a consistent random threshold for this character
-          const charRandom = hash(col, row)
+          const fadeEffect = getFadeEffect(fadeEffectType)
 
-          // 3 opacity levels: 0, 0.5, 1
-          // Each character has a random "appear threshold" (0-1)
-          // As fadeProgress increases, more characters appear
-          // Characters first appear at 0.5 opacity, then full opacity
-
-          if (fadeProgress < charRandom * 0.5) {
-            // Character hasn't started appearing yet
-            charOpacityMultiplier = 0
-          } else if (fadeProgress < charRandom) {
-            // Character is at half opacity (flickering stage)
-            charOpacityMultiplier = 0.5
-          } else {
-            // Character is fully visible
-            charOpacityMultiplier = 1
+          // Build context for fade effect
+          const ctx: FadeEffectContext = {
+            fadeProgress,
+            col,
+            row,
+            charIndex: globalCharIndex,
+            totalChars: item.fixed.fadeTotalChars ?? item.text?.length ?? 0,
+            char,
+            fadeReverse: item.fixed.fadeReverse,
           }
+
+          // Add bg value for bg effect
+          if (fadeEffectType === "bg") {
+            ctx.bgValue = simplexNoise3D(col * 0.5, row * 0.5, time * 0.5)
+          }
+
+          // Add word info for words effect
+          if (fadeEffectType === "words" && wordInfo && wordOrder) {
+            const charWordInfo = getCharWordInfo(globalCharIndex, wordInfo)
+            if (charWordInfo) {
+              ctx.wordIndex = charWordInfo.wordIndex
+              ctx.charInWord = charWordInfo.charInWord
+              ctx.wordLength = wordInfo[charWordInfo.wordIndex].word.length
+              ctx.totalWords = wordInfo.length
+              ctx.wordOrder = wordOrder
+            }
+          }
+
+          const result = fadeEffect(ctx)
+          charOpacityMultiplier = result.opacity
         }
 
         // Whitespace handling
         let mask = 0
         let charOpacity = 0
 
-        if (char === " " && item.renderSpaces === false) {
+        if (char === " " && !item.renderSpaces) {
           // Do nothing (default 0)
         } else if (char === " ") {
           // Render space (overwrite bg)
@@ -353,6 +407,8 @@ export const computeTextLayer = (
         const idx = (row * cols + col) * 2
         buffer[idx] = mask
         buffer[idx + 1] = charOpacity
+
+        globalCharIndex++
       }
     })
   })

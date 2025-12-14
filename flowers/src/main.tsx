@@ -6,7 +6,7 @@ import App from "./App.tsx"
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <Leva hidden={import.meta.env.PROD} />
+    <Leva hidden={true || import.meta.env.PROD} />
     <App />
   </StrictMode>,
 )

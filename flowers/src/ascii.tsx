@@ -7,8 +7,23 @@ import {
   computeTextLayer,
 } from "./lib/char-pickers"
 import type { TextItem } from "./lib/char-pickers"
+import { LF_WORDMARK } from "./constants"
 
 type Gl = WebGL2RenderingContext
+type RGB = [number, number, number]
+type RGBInput = RGB | string
+
+/** Parse CSS color string like 'rgb(56.9% 23.8% 17.5%)' or 'rgb(255, 128, 0)' to [0-1, 0-1, 0-1] */
+const parseColor = (input: RGBInput): RGB => {
+  if (Array.isArray(input)) return input
+  const match = input.match(/rgb\(\s*([^\s,]+)[,\s]+([^\s,]+)[,\s]+([^\s,)]+)/)
+  if (!match) return [1, 1, 1]
+  const parse = (v: string) => {
+    if (v.endsWith("%")) return parseFloat(v) / 100
+    return parseFloat(v) / 255
+  }
+  return [parse(match[1]), parse(match[2]), parse(match[3])]
+}
 
 interface AsciiNoiseEffectProps {
   className?: string
@@ -24,7 +39,8 @@ interface AsciiNoiseEffectProps {
   textItems?: TextItem[]
   bgOpacity?: number
   fgOpacity?: number
-  tint?: [number, number, number]
+  bgTint?: RGBInput
+  fgTint?: RGBInput
   scrollY?: number
   gridOffset?: [number, number]
   distortAmp?: number
@@ -40,7 +56,7 @@ interface AsciiNoiseEffectProps {
   vignette?: number
   vignetteSoftness?: number
   glyphSharpness?: number
-  bg?: [number, number, number]
+  bg?: RGBInput
 }
 
 const vs = `#version 300 es
@@ -190,6 +206,7 @@ uniform float uSeedB;
 uniform mediump usampler2D uTextMap; // R=bitmask, G=opacity
 uniform float uBgOpacity;
 uniform float uFgOpacity;
+uniform vec3 uFgTintColor;
 
 float gray(vec3 color){return dot(color, vec3(0.3,0.59,0.11));}
 
@@ -304,8 +321,8 @@ void main(){
     float charVal = character(charMapValue, charPixelUv);
 
     // We render the text color.
-    // Base text color is uTintColor * uBrightness.
-    vec3 textColor = uTintColor * uBrightness * charVal;
+    // Base text color is uFgTintColor * uBrightness.
+    vec3 textColor = uFgTintColor * uBrightness * charVal;
 
     // Final text contribution:
     // If we simply return this color, it overwrites.
@@ -420,10 +437,24 @@ export const AsciiNoiseEffect = ({
   cell = 30,
   bw = false,
   charset = 3,
-  // tint = [0.7887163636784402, 1, 1],
-  tint = [0.96, 1, 1],
-  // distortAmp = 0.6,
-  distortAmp = 0.2,
+  bgTint = [1, 0.3, 0.3],
+  fgTint = [1, 0.99, 0.99],
+  bg = [0, 0, 0],
+
+  /* fgTint = "rgb(100% 86.4% 58.3%)",
+   * bgTint = "rgb(56.9% 23.8% 17.5%)",
+   * bg = "rgb(30.3% 10.5% 5.64%)", */
+
+  /* fgTint = "rgb(98.5% 38% 68.7%)",
+   * bgTint = "rgb(60.4% 43.2% 100%)",
+   * bg = "rgb(43.2% 26.2% 80.8%)", */
+
+  /* fgTint = "rgb(98.5% 38% 68.7%)",
+   * bgTint = "rgb(60.4% 43.2% 100%)",
+   * bg = "rgb(0% 0% 0%)", */
+
+  distortAmp = 0.6,
+  // distortAmp = 0.2,
   frequency = 16.4,
   zRate = 0,
   brightness = 1,
@@ -437,7 +468,6 @@ export const AsciiNoiseEffect = ({
   vignetteSoftness = 1.39,
   glyphSharpness = 0.04,
   // bg = [0.0960355316732419, 0.0642024569325834, 0.06926603172039973],
-  bg = [0, 0, 0],
   className,
 
   textItems,
@@ -445,7 +475,7 @@ export const AsciiNoiseEffect = ({
   fgOpacity = 1,
   scrollY = 0, // In grid units (cells)
   gridOffset = [0, 0], // Background translation in grid units
-  text = "LIMINal.flOWERS ",
+  text = LF_WORDMARK,
   textOffset = [0, 0],
   lineOffsetIncrease = 5,
 }: AsciiNoiseEffectProps) => {
@@ -466,7 +496,8 @@ export const AsciiNoiseEffect = ({
     textItems,
     bgOpacity,
     fgOpacity,
-    tint,
+    bgTint,
+    fgTint,
     scrollY,
     gridOffset,
     distortAmp,
@@ -500,7 +531,8 @@ export const AsciiNoiseEffect = ({
       textItems,
       bgOpacity,
       fgOpacity,
-      tint,
+      bgTint,
+      fgTint,
       scrollY,
       gridOffset,
       distortAmp,
@@ -531,7 +563,8 @@ export const AsciiNoiseEffect = ({
     textItems,
     bgOpacity,
     fgOpacity,
-    tint,
+    bgTint,
+    fgTint,
     scrollY,
     gridOffset,
     distortAmp,
@@ -633,6 +666,7 @@ export const AsciiNoiseEffect = ({
       uTextMap: gl.getUniformLocation(progAscii, "uTextMap")!,
       uBgOpacity: gl.getUniformLocation(progAscii, "uBgOpacity")!,
       uFgOpacity: gl.getUniformLocation(progAscii, "uFgOpacity")!,
+      uFgTintColor: gl.getUniformLocation(progAscii, "uFgTintColor")!,
     } as const
 
     const texTextMap = gl.createTexture()!
@@ -706,7 +740,8 @@ export const AsciiNoiseEffect = ({
         textItems,
         bgOpacity,
         fgOpacity,
-        tint,
+        bgTint,
+        fgTint,
         scrollY,
         gridOffset,
         distortAmp,
@@ -727,6 +762,11 @@ export const AsciiNoiseEffect = ({
         textOffset,
         lineOffsetIncrease,
       } = propsRef.current
+
+      // Parse color inputs
+      const bgTintRgb = parseColor(bgTint!)
+      const fgTintRgb = parseColor(fgTint!)
+      const bgRgb = parseColor(bg!)
 
       const {
         gl,
@@ -752,7 +792,7 @@ export const AsciiNoiseEffect = ({
       gl.uniform1f(uNoise.uNoiseStrength, noiseStrength!)
       gl.uniform1f(uNoise.uNoiseScale, noiseScale!)
       gl.uniform1f(uNoise.uSpeed, speed!)
-      gl.uniform3f(uNoise.uTintColor, tint![0], tint![1], tint![2])
+      gl.uniform3f(uNoise.uTintColor, bgTintRgb[0], bgTintRgb[1], bgTintRgb[2])
       gl.uniform1f(uNoise.uDistortionAmplitude, distortAmp!)
       gl.uniform1f(uNoise.uFrequency, frequency!)
       gl.uniform1f(uNoise.uZAxisEvolutionRate, zRate!)
@@ -772,7 +812,7 @@ export const AsciiNoiseEffect = ({
       gl.uniform1f(uNoise.uVignetteStrength, vignette!)
       gl.uniform1f(uNoise.uVignetteSoftness, vignetteSoftness!)
       gl.uniform1f(uNoise.uGlyphSharpness, glyphSharpness!)
-      gl.uniform3f(uNoise.uBackgroundColor, bg![0], bg![1], bg![2])
+      gl.uniform3f(uNoise.uBackgroundColor, bgRgb[0], bgRgb[1], bgRgb[2])
       gl.drawArrays(gl.TRIANGLES, 0, 6)
 
       gl.bindFramebuffer(gl.FRAMEBUFFER, null)
@@ -798,7 +838,14 @@ export const AsciiNoiseEffect = ({
       // Or we can just bind a 1x1 empty texture.
       // But computeTextLayer handles empty items returning zeroed buffer.
 
-      const textBuffer = computeTextLayer(textItems || [], cols, rows, scrollY)
+      const textBuffer = computeTextLayer(
+        textItems || [],
+        cols,
+        rows,
+        scrollY,
+        undefined,
+        t,
+      )
 
       gl.activeTexture(gl.TEXTURE1)
       gl.bindTexture(gl.TEXTURE_2D, texTextMap)
@@ -823,7 +870,13 @@ export const AsciiNoiseEffect = ({
       gl.uniform1i(uAscii.uCharSetId, charset!)
       gl.uniform1f(uAscii.uBrightness, brightness!)
       gl.uniform1f(uAscii.uContrast, contrast!)
-      gl.uniform3f(uAscii.uTintColor, tint![0], tint![1], tint![2])
+      gl.uniform3f(uAscii.uTintColor, bgTintRgb[0], bgTintRgb[1], bgTintRgb[2])
+      gl.uniform3f(
+        uAscii.uFgTintColor,
+        fgTintRgb[0],
+        fgTintRgb[1],
+        fgTintRgb[2],
+      )
       gl.uniform1f(uAscii.uTime, t)
       gl.uniform1f(uAscii.uDistortionAmplitude, distortAmp!)
       gl.uniform1f(uAscii.uFrequency, frequency!)
